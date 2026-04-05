@@ -1,7 +1,7 @@
 use crate::models::SlackSigningSecret;
 use futures_util::TryFutureExt;
 use hmac::digest::Key;
-use hmac::{Hmac, Mac};
+use hmac::*;
 use rsb_derive::Builder;
 use rvstruct::*;
 use sha2::Sha256;
