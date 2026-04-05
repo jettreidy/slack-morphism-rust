@@ -168,6 +168,14 @@ pub enum SlackMessageEventType {
     ShareShortcut,
     #[serde(rename = "channel_canvas_updated")]
     ChannelCanvasUpdated,
+    #[serde(rename = "tabbed_canvas_updated")]
+    TabbedCanvasUpdated,
+    #[serde(rename = "channel_posting_permissions")]
+    ChannelPostingPermissions,
+    /// Catch-all for unknown subtypes Slack may add in the future.
+    /// Preserves the original subtype string.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[skip_serializing_none]
