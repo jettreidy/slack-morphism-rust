@@ -37,7 +37,6 @@ where
 #[derive(Clone, Debug)]
 enum SlackTungsteniteWssClientCommand {
     Message(String),
-    Ping,
     Pong(Vec<u8>),
     Exit,
 }
@@ -225,36 +224,55 @@ where
             let thread_destroyed = destroyed.clone();
 
             tokio::spawn(async move {
-                while let Some(message) = rx.recv().await {
+                let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
+                    thread_identity.config.ping_interval_in_seconds,
+                ));
+                ping_interval.tick().await;
+
+                loop {
                     if thread_destroyed.load(Ordering::Relaxed) {
                         break;
                     }
-                    match message {
-                        SlackTungsteniteWssClientCommand::Message(body) => {
-                            if writer
-                                .send(tokio_tungstenite::tungstenite::Message::Text(body.into()))
-                                .await
-                                .is_err()
-                            {
-                                rx.close()
+                    tokio::select! {
+                        Some(message) = rx.recv() => {
+                            match message {
+                                SlackTungsteniteWssClientCommand::Message(body) => {
+                                    if writer
+                                        .send(tokio_tungstenite::tungstenite::Message::Text(body.into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        rx.close()
+                                    }
+                                }
+                                SlackTungsteniteWssClientCommand::Pong(body) => {
+                                    trace!(
+                                        slack_wss_client_id = thread_identity.id.to_string().as_str(),
+                                        "[{}] Pong to Slack: {:?}",
+                                        thread_identity.id.to_string(),
+                                        body
+                                    );
+                                    if writer
+                                        .send(tokio_tungstenite::tungstenite::Message::Pong(body.into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        rx.close()
+                                    }
+                                }
+                                SlackTungsteniteWssClientCommand::Exit => {
+                                    writer.close().await.unwrap_or(());
+                                    rx.close();
+                                    trace!(
+                                        slack_wss_client_id = thread_identity.id.to_string().as_str(),
+                                        "[{}] WSS client command channel has been closed",
+                                        thread_identity.id.to_string()
+                                    );
+                                    break;
+                                }
                             }
                         }
-                        SlackTungsteniteWssClientCommand::Pong(body) => {
-                            trace!(
-                                slack_wss_client_id = thread_identity.id.to_string().as_str(),
-                                "[{}] Pong to Slack: {:?}",
-                                thread_identity.id.to_string(),
-                                body
-                            );
-                            if writer
-                                .send(tokio_tungstenite::tungstenite::Message::Pong(body.into()))
-                                .await
-                                .is_err()
-                            {
-                                rx.close()
-                            }
-                        }
-                        SlackTungsteniteWssClientCommand::Ping => {
+                        _ = ping_interval.tick() => {
                             let body: [u8; 5] = rand::random();
                             trace!(
                                 slack_wss_client_id = thread_identity.id.to_string().as_str(),
@@ -282,7 +300,13 @@ where
                                     thread_identity.id.to_string(),
                                     seen_pong_time_in_secs
                                 );
-                                rx.close()
+                                rx.close();
+                                writer.close().await.unwrap_or(());
+                                thread_identity
+                                    .client_listener
+                                    .on_disconnect(&thread_identity.id)
+                                    .await;
+                                break;
                             } else if let Err(err) = writer
                                 .send(tokio_tungstenite::tungstenite::Message::Ping(
                                     body.to_vec().into(),
@@ -295,51 +319,18 @@ where
                                     thread_identity.id.to_string(),
                                     err
                                 );
-                                rx.close()
+                                rx.close();
+                                writer.close().await.unwrap_or(());
+                                thread_identity
+                                    .client_listener
+                                    .on_disconnect(&thread_identity.id)
+                                    .await;
+                                break;
                             }
                         }
-                        SlackTungsteniteWssClientCommand::Exit => {
-                            writer.close().await.unwrap_or(());
-                            rx.close();
-                            trace!(
-                                slack_wss_client_id = thread_identity.id.to_string().as_str(),
-                                "[{}] WSS client command channel has been closed",
-                                thread_identity.id.to_string()
-                            );
+                        else => {
                             break;
                         }
-                    }
-                }
-            });
-        }
-
-        {
-            let thread_identity = identity.clone();
-            let ping_tx = tx.clone();
-            let thread_destroyed = destroyed.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                    thread_identity.config.ping_interval_in_seconds,
-                ));
-
-                loop {
-                    if thread_destroyed.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    interval.tick().await;
-                    if !ping_tx.is_closed() {
-                        if ping_tx
-                            .send(SlackTungsteniteWssClientCommand::Ping)
-                            .is_err()
-                        {
-                            break;
-                        }
-                    } else {
-                        thread_identity
-                            .client_listener
-                            .on_disconnect(&thread_identity.id)
-                            .await;
-                        break;
                     }
                 }
             });
@@ -383,7 +374,7 @@ where
                                 slack_wss_client_id = thread_identity.id.to_string().as_str(),
                                 "[{}] Ping from Slack: {:?}",
                                 thread_identity.id.to_string(),
-                                body
+                                &body
                             );
                             tx.send(SlackTungsteniteWssClientCommand::Pong(body.into()))
                                 .unwrap_or(());
@@ -393,7 +384,7 @@ where
                                 slack_wss_client_id = thread_identity.id.to_string().as_str(),
                                 "[{}] Pong from Slack: {:?}",
                                 thread_identity.id.to_string(),
-                                body
+                                &body
                             );
                             let mut last_pong = thread_last_time_pong_received.write().await;
                             last_pong.time = SystemTime::now();
